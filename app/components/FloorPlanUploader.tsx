@@ -8,23 +8,64 @@ type UploadedFile = {
   url: string;
 };
 
-const ACCEPTED = ["image/png", "image/jpeg", "application/pdf"];
-const ACCEPT_ATTR = ".png,.jpg,.jpeg,.pdf";
+type Room = {
+  name: string;
+  approxWidthFt: number | null;
+  approxLengthFt: number | null;
+  notes?: string;
+};
+
+type ParsedFloorPlan = {
+  rooms: Room[];
+  totalApproxSqFt: number | null;
+  scaleFound: boolean;
+  warnings: string[];
+};
+
+const ACCEPTED = ["image/png", "image/jpeg"];
+const ACCEPT_ATTR = ".png,.jpg,.jpeg";
+const MAX_FILE_SIZE = 10 * 1024 * 1024;
 
 export default function FloorPlanUploader() {
   const [file, setFile] = useState<UploadedFile | null>(null);
   const [dragging, setDragging] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [parsing, setParsing] = useState(false);
+  const [parseResult, setParseResult] = useState<ParsedFloorPlan | null>(null);
+  const [parseError, setParseError] = useState<string | null>(null);
   const inputRef = useRef<HTMLInputElement>(null);
 
-  const process = useCallback((raw: File) => {
+  const process = useCallback(async (raw: File) => {
     if (!ACCEPTED.includes(raw.type)) {
-      setError("Only PNG, JPG, and PDF files are supported.");
+      setError("Only PNG and JPG files are supported.");
+      return;
+    }
+    if (raw.size > MAX_FILE_SIZE) {
+      setError("File exceeds the 10 MB limit.");
       return;
     }
     setError(null);
+    setParseResult(null);
+    setParseError(null);
     const url = URL.createObjectURL(raw);
     setFile({ name: raw.name, type: raw.type, url });
+
+    setParsing(true);
+    try {
+      const form = new FormData();
+      form.append("file", raw);
+      const res = await fetch("/api/parse-floorplan", { method: "POST", body: form });
+      const json = await res.json();
+      if (!res.ok) {
+        setParseError(json.error ?? "An unexpected error occurred.");
+      } else {
+        setParseResult(json as ParsedFloorPlan);
+      }
+    } catch {
+      setParseError("Network error — could not reach the server.");
+    } finally {
+      setParsing(false);
+    }
   }, []);
 
   const onDragOver = (e: React.DragEvent) => {
@@ -50,10 +91,11 @@ export default function FloorPlanUploader() {
     if (file) URL.revokeObjectURL(file.url);
     setFile(null);
     setError(null);
+    setParseResult(null);
+    setParseError(null);
+    setParsing(false);
     if (inputRef.current) inputRef.current.value = "";
   };
-
-  const isImage = file && (file.type === "image/png" || file.type === "image/jpeg");
 
   return (
     <div className="w-full max-w-2xl">
@@ -91,7 +133,7 @@ export default function FloorPlanUploader() {
             <p className="mt-1 text-sm text-zinc-500">
               or <span className="text-blue-600 underline">click to browse</span>
             </p>
-            <p className="mt-3 text-xs text-zinc-400">PNG, JPG, or PDF — max 20 MB</p>
+            <p className="mt-3 text-xs text-zinc-400">PNG or JPG — max 10 MB</p>
           </div>
           <input
             ref={inputRef}
@@ -112,31 +154,94 @@ export default function FloorPlanUploader() {
               Remove
             </button>
           </div>
-          {isImage ? (
-            // eslint-disable-next-line @next/next/no-img-element
-            <img
-              src={file.url}
-              alt="Floor plan preview"
-              className="w-full rounded-xl object-contain max-h-[480px] bg-zinc-50"
-            />
-          ) : (
-            <div className="flex flex-col items-center justify-center gap-3 rounded-xl bg-zinc-50 py-12">
+
+          {/* eslint-disable-next-line @next/next/no-img-element */}
+          <img
+            src={file.url}
+            alt="Floor plan preview"
+            className="w-full rounded-xl object-contain max-h-[480px] bg-zinc-50"
+          />
+
+          {parsing && (
+            <div className="mt-6 flex items-center gap-2 text-sm text-zinc-500">
               <svg
+                className="animate-spin h-4 w-4 shrink-0"
                 xmlns="http://www.w3.org/2000/svg"
-                className="h-12 w-12 text-red-400"
                 fill="none"
                 viewBox="0 0 24 24"
-                stroke="currentColor"
-                strokeWidth={1.5}
               >
+                <circle
+                  className="opacity-25"
+                  cx="12"
+                  cy="12"
+                  r="10"
+                  stroke="currentColor"
+                  strokeWidth="4"
+                />
                 <path
-                  strokeLinecap="round"
-                  strokeLinejoin="round"
-                  d="M19.5 14.25v-2.625a3.375 3.375 0 0 0-3.375-3.375h-1.5A1.125 1.125 0 0 1 13.5 7.125v-1.5a3.375 3.375 0 0 0-3.375-3.375H8.25m0 12.75h7.5m-7.5 3H12M10.5 2.25H5.625c-.621 0-1.125.504-1.125 1.125v17.25c0 .621.504 1.125 1.125 1.125h12.75c.621 0 1.125-.504 1.125-1.125V11.25a9 9 0 0 0-9-9Z"
+                  className="opacity-75"
+                  fill="currentColor"
+                  d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"
                 />
               </svg>
-              <p className="text-sm font-medium text-zinc-600">PDF uploaded</p>
-              <p className="text-xs text-zinc-400">{file.name}</p>
+              Analysing floor plan…
+            </div>
+          )}
+
+          {parseError && (
+            <p className="mt-4 text-sm text-red-600">{parseError}</p>
+          )}
+
+          {parseResult && (
+            <div className="mt-6 space-y-4">
+              {parseResult.warnings.length > 0 && (
+                <div className="rounded-lg border border-yellow-200 bg-yellow-50 px-4 py-3 text-sm text-yellow-800">
+                  <p className="mb-1 font-medium">Warnings</p>
+                  <ul className="list-inside list-disc space-y-0.5">
+                    {parseResult.warnings.map((w, i) => (
+                      <li key={i}>{w}</li>
+                    ))}
+                  </ul>
+                </div>
+              )}
+
+              <div>
+                <h3 className="mb-2 text-sm font-semibold text-zinc-700">Rooms</h3>
+                <div className="space-y-1.5">
+                  {[...parseResult.rooms]
+                    .sort((a, b) => {
+                      const aKnown = a.approxWidthFt != null && a.approxLengthFt != null;
+                      const bKnown = b.approxWidthFt != null && b.approxLengthFt != null;
+                      if (aKnown && !bKnown) return -1;
+                      if (!aKnown && bKnown) return 1;
+                      return 0;
+                    })
+                    .map((room, i) => (
+                      <div
+                        key={i}
+                        className="flex items-start justify-between rounded-lg bg-zinc-50 px-4 py-2 text-sm"
+                      >
+                        <div>
+                          <span className="font-medium capitalize text-zinc-700">{room.name}</span>
+                          {room.notes && (
+                            <p className="mt-0.5 text-xs text-zinc-400">{room.notes}</p>
+                          )}
+                        </div>
+                        <span className="ml-4 shrink-0 text-zinc-500">
+                          {room.approxWidthFt != null && room.approxLengthFt != null
+                            ? `${room.approxWidthFt} × ${room.approxLengthFt} ft`
+                            : "dimensions unknown"}
+                        </span>
+                      </div>
+                    ))}
+                </div>
+              </div>
+
+              {parseResult.totalApproxSqFt != null && (
+                <p className="text-sm text-zinc-600">
+                  Total: ~{parseResult.totalApproxSqFt.toLocaleString()} sq ft
+                </p>
+              )}
             </div>
           )}
         </div>
